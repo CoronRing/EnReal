@@ -1,0 +1,13 @@
+# Normalise every text file to LF in the repository and in the working tree.
+# Without this, a checkout on Windows bakes CRLF into any wheel built there.
+* text=auto eol=lf
+
+# Binary assets: never let git rewrite them.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.wav binary
+*.whl binary

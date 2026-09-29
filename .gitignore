@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node (browser parity test)
+node_modules/
+
+# Engine wheel copied into the web build by scripts/build_web.py
+web/engine/
+
+# Generated story packs from the retired story prototype; they hold
+# third-party voice clips and must never be committed.
+story_pack/
+
+# Local scratch and logs
+.agent_temp/
+.log/
+.env
+.env.*
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

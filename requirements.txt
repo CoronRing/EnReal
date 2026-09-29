@@ -1,0 +1,8 @@
+# requirements.txt
+fastapi==0.115.4
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+opencv-python==4.10.0.84
+numpy==2.1.2
+pillow
+litellm

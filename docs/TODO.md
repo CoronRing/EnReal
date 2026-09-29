@@ -1,0 +1,27 @@
+- Improve UI
+- Isolate store player into isolated project
+- Add in audio core
+- Add in video play mode
+- Add in parallel processing
+- Fix chat endpints
+- Fix close button, it's floating around
+- Fix close area, currently its top left corner
+- Add Stage selection 
+    - datapack
+    - Cache so same request is not duplicated
+- Need a main page
+  - I think should be isolated project
+- Need better play ability
+- AI generated invnetory
+  - General AIGC media, should be pixel art to less ai-like
+- Blockbench like editable interface
+- Do something with border and boundary
+- Mobile control mode?
+- Gernade is too bouncy
+- Gernade is too fast and sometimes go through walls
+- Black spot remain when bomb explodes
+- Maybe some areas can be thicker
+- Need some solid lines
+- npc fall through floor
+- Some obvious line do not render
+- Short jump and long jump
