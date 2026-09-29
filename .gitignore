@@ -32,3 +32,6 @@ story_pack/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local site builds (scripts/build_web.py --out _site)
+_site/

@@ -1,7 +1,10 @@
-# app/geometry.py
-from dataclasses import dataclass
-from typing import List, Literal, Tuple, Dict
+"""Geometry primitives for stage segments: length, angle, grid snapping and merging."""
+
+from __future__ import annotations
+
 import math
+from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
@@ -41,10 +44,10 @@ def _normalize_segment(s: Segment) -> Segment:
         return s
 
 
-def snap_segments_to_grid(segments: List[Segment], grid: int) -> List[Segment]:
+def snap_segments_to_grid(segments: list[Segment], grid: int) -> list[Segment]:
     if grid <= 1:
         return segments
-    snapped: List[Segment] = []
+    snapped: list[Segment] = []
     for s in segments:
         snapped.append(
             Segment(
@@ -57,19 +60,19 @@ def snap_segments_to_grid(segments: List[Segment], grid: int) -> List[Segment]:
     return snapped
 
 
-def snap_points_to_grid(points: List[Tuple[int, int]], grid: int) -> List[Tuple[int, int]]:
+def snap_points_to_grid(points: list[tuple[int, int]], grid: int) -> list[tuple[int, int]]:
     if grid <= 1:
         return points
     return [(int(round(x / grid) * grid), int(round(y / grid) * grid)) for (x, y) in points]
 
 
 def merge_segments_axis(
-    segments: List[Segment],
+    segments: list[Segment],
     axis: Literal["x", "y"],
     snap: int,
     join_gap: int,
     min_len: int,
-) -> List[Segment]:
+) -> list[Segment]:
     """
     Merge colinear segments along a given axis:
       - axis='y' for horizontals: cluster by y and merge overlapping x ranges
@@ -82,7 +85,7 @@ def merge_segments_axis(
     segs = [snap_segments_to_grid([_normalize_segment(s)], grid=snap)[0] for s in segments]
 
     # Cluster by axis coordinate using a tolerance equal to snap
-    buckets: Dict[int, List[Segment]] = {}
+    buckets: dict[int, list[Segment]] = {}
     for s in segs:
         if axis == "y":
             y_val = int(round((s.y1 + s.y2) * 0.5))
@@ -92,7 +95,7 @@ def merge_segments_axis(
             key = int(round(x_val / snap) * snap)
         buckets.setdefault(key, []).append(s)
 
-    merged: List[Segment] = []
+    merged: list[Segment] = []
     for key, group in buckets.items():
         if axis == "y":
             # Merge by x ranges on same y bucket
@@ -143,12 +146,13 @@ def merge_segments_axis(
 
 # -------- Oblique (slanted) segment merging ----------
 
-def _unit_from_angle_deg(angle_deg: float) -> Tuple[float, float]:
+
+def _unit_from_angle_deg(angle_deg: float) -> tuple[float, float]:
     theta = math.radians(angle_deg)
     return math.cos(theta), math.sin(theta)
 
 
-def _perp_unit_from_angle_deg(angle_deg: float) -> Tuple[float, float]:
+def _perp_unit_from_angle_deg(angle_deg: float) -> tuple[float, float]:
     ux, uy = _unit_from_angle_deg(angle_deg)
     # Rotate by +90 degrees to get normal
     return -uy, ux
@@ -159,14 +163,14 @@ def _dot(ax: float, ay: float, bx: float, by: float) -> float:
 
 
 def merge_oblique_segments(
-    segments: List[Segment],
+    segments: list[Segment],
     angle_bucket_deg: float,
     angle_tol_deg: float,
     offset_tol_px: int,
     join_gap_px: int,
     min_len_px: int,
     grid: int,
-) -> List[Segment]:
+) -> list[Segment]:
     """
     Merge non-axis-aligned segments by clustering on:
       - orientation (angle bucket)
@@ -198,7 +202,7 @@ def merge_oblique_segments(
         entries.append((angle, (x1, y1, x2, y2)))
 
     # Cluster by angle bucket and offset
-    buckets: Dict[Tuple[int, int, int], List[Tuple[float, float, float, float, float, float, float, float]]] = {}
+    buckets: dict[tuple[int, int, int], list[tuple[float, float, float, float, float, float, float, float]]] = {}
     for angle, (x1, y1, x2, y2) in entries:
         # Determine bucket center
         bucket = int(round(angle / angle_bucket_deg) * angle_bucket_deg)
@@ -220,7 +224,7 @@ def merge_oblique_segments(
         idx = (int(bucket), off_key, 0)
         buckets.setdefault(idx, []).append((x1, y1, x2, y2, ux, uy, nx, ny))
 
-    merged: List[Segment] = []
+    merged: list[Segment] = []
     for (bucket_angle, off_key, _), segs in buckets.items():
         ux, uy = _unit_from_angle_deg(bucket_angle)
         nx, ny = _perp_unit_from_angle_deg(bucket_angle)
@@ -228,8 +232,8 @@ def merge_oblique_segments(
         off = off_key * float(max(1, offset_tol_px))
 
         # For all segments in this bucket, get t-intervals along direction
-        intervals: List[Tuple[float, float]] = []
-        for (x1, y1, x2, y2, *_rest) in segs:
+        intervals: list[tuple[float, float]] = []
+        for x1, y1, x2, y2, *_rest in segs:
             t1 = _dot(x1, y1, ux, uy)
             t2 = _dot(x2, y2, ux, uy)
             a, b = (t1, t2) if t1 <= t2 else (t2, t1)
@@ -237,9 +241,9 @@ def merge_oblique_segments(
         intervals.sort(key=lambda ab: ab[0])
 
         # Merge intervals by join_gap_px
-        merged_intervals: List[Tuple[float, float]] = []
+        merged_intervals: list[tuple[float, float]] = []
         cur_a, cur_b = intervals[0]
-        for (a, b) in intervals[1:]:
+        for a, b in intervals[1:]:
             if a <= cur_b + join_gap_px:
                 cur_b = max(cur_b, b)
             else:
@@ -248,7 +252,7 @@ def merge_oblique_segments(
         merged_intervals.append((cur_a, cur_b))
 
         # Reconstruct segments from merged intervals
-        for (a, b) in merged_intervals:
+        for a, b in merged_intervals:
             if (b - a) < min_len_px:
                 continue
             # Convert line coordinates back to 2D points: p = d*t + n*off

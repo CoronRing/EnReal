@@ -1,4 +1,4 @@
-/* app/static/game.js
+/* EnReal game: builds a playable stage from the engine's output.
    Matter-based platformer with pixel terrain editing and full mechanics:
    - Status bar + Inventory panel (pauses game)
    - NPC (chat UI on J nearby, pauses game)
@@ -7,129 +7,48 @@
    - Bomb (K) place/detonate; Grenade (G) throw/bounce/detonate; explosions clear red pixels + damage enemies
    - Terrain paint (H) beneath player
    - Movement: sprint (Shift), double jump, drop-through (S), sprint-through walls
-   - VN intro integration (runs before starting the game) via vn_player.js if payload contains a manifest
 
-   Notes:
-   - Requires vn_player.js loaded before this file if you want VN intros.
-   - Supports both legacy payload (enreal_skeleton/bg) and new payload (enreal_payload with manifestUrl).
+   Input: the payload app.js stores in sessionStorage (key enreal_payload) and window.name:
+   { skeleton, bgDataUrl }, where bgDataUrl is the engine overlay. Pure red pixels in that
+   image are the collision terrain.
 */
 
 (function () {
-  // -------------------- VN integration + Payload handling --------------------
+  // -------------------- Payload handling --------------------
   function getPayload() {
-    console.log('[getPayload] Attempting to retrieve payload...');
-    
-    // Newer combined payload
     try {
       const s = sessionStorage.getItem('enreal_payload');
-      console.log('[getPayload] enreal_payload from sessionStorage:', s ? 'found' : 'not found');
-      if (s) {
-        const parsed = JSON.parse(s);
-        console.log('[getPayload] Parsed enreal_payload:', parsed);
-        return parsed;
-      }
+      if (s) return JSON.parse(s);
     } catch (e) {
       console.error('[getPayload] Error parsing enreal_payload:', e);
     }
 
-    // Legacy: window.name with skeleton+bgDataUrl
+    // Fallback for browsers that block sessionStorage: app.js also writes window.name.
     try {
-      console.log('[getPayload] Checking window.name:', window.name ? 'has value' : 'empty');
       if (window.name && window.name.startsWith('{')) {
         const obj = JSON.parse(window.name);
-        console.log('[getPayload] Parsed window.name:', obj);
-        if (obj && obj.skeleton && (obj.bgDataUrl || obj.packBaseUrl || obj.manifestUrl)) {
-          console.log('[getPayload] Using window.name payload');
-          return obj;
-        } else {
-          console.log('[getPayload] window.name has JSON but missing required fields');
-        }
+        if (obj && obj.skeleton && obj.bgDataUrl) return obj;
       }
     } catch (e) {
       console.error('[getPayload] Error parsing window.name:', e);
     }
 
-    // Legacy: separate keys
-    try {
-      const skelStr = sessionStorage.getItem('enreal_skeleton');
-      const bgDataUrl = sessionStorage.getItem('enreal_bg');
-      console.log('[getPayload] Legacy keys - skeleton:', skelStr ? 'found' : 'not found', ', bg:', bgDataUrl ? 'found' : 'not found');
-      if (skelStr && bgDataUrl) {
-        const result = { skeleton: JSON.parse(skelStr), bgDataUrl };
-        console.log('[getPayload] Using legacy separate keys payload');
-        return result;
-      }
-    } catch (e) {
-      console.error('[getPayload] Error parsing legacy keys:', e);
-    }
-
-    console.warn('[getPayload] No payload found from any source');
     return null;
   }
 
-  // Boot: if VN manifest exists, play it first; then start the game
-  async function boot() {
+  function boot() {
     const payload = getPayload();
-    console.log('[boot] Payload retrieved:', payload);
-    
     if (!payload || !payload.skeleton) {
-      const msg = 'No stage data found. Please process an image first, then click Play.';
-      document.body.innerHTML = '<div style="padding:20px;color:#eee;font-family:system-ui">' + msg + '</div>';
-      console.error('[boot] ' + msg);
+      const root = document.getElementById('game-root');
+      root.innerHTML =
+        '<div class="empty">No stage yet. <a href="index.html">Make one from an image</a>, then press Play.</div>';
+      console.error('[boot] No stage data found.');
       return;
     }
-
-    console.log('[boot] Skeleton found:', payload.skeleton);
-    console.log('[boot] Payload keys:', Object.keys(payload));
-
-    // Helper to start Phaser after VN finishes (or if no VN is present)
-    const startGame = () => bootPhaser(payload);
-
-    // If shared VN engine is present and a manifest is available, run VN first
-    let manifestUrl = payload.manifestUrl || (payload.packBaseUrl ? (payload.packBaseUrl + '/manifest.json') : null);
-    console.log('[boot] Initial manifestUrl:', manifestUrl);
-    console.log('[boot] payload.manifestUrl:', payload.manifestUrl);
-    console.log('[boot] payload.packBaseUrl:', payload.packBaseUrl);
-    
-    // Convert absolute server path to relative file path if using file:// protocol
-    if (manifestUrl && window.location.protocol === 'file:' && manifestUrl.startsWith('/')) {
-      console.log('[boot] Converting file:// protocol path from:', manifestUrl);
-      // From game.html at <project>/src/frontend/game.html to story_pack at project root
-      manifestUrl = '../../../../../story_pack' + manifestUrl.substring('/story_pack'.length);
-      console.log('[boot] Converted to:', manifestUrl);
-    }
-    
-    console.log('[boot] Final manifestUrl:', manifestUrl);
-    console.log('[boot] VNPlayer available:', typeof window.VNPlayer !== 'undefined');
-    
-    if (typeof window.VNPlayer !== 'undefined' && manifestUrl) {
-      try {
-        console.log('[boot] Starting VN with manifest:', manifestUrl);
-        const root = document.getElementById('game-root');
-        const player = VNPlayer.create({
-          rootEl: root,
-          typeSpeed: 16,
-          onEnd: startGame,
-        });
-        await player.loadAndStart(manifestUrl);
-        console.log('[boot] VN completed successfully');
-      } catch (e) {
-        console.warn('[boot] VN failed, continuing to game:', e);
-        startGame();
-      }
-    } else {
-      // No VN engine or no manifest – start game immediately
-      if (!manifestUrl) {
-        console.log('[boot] No manifestUrl found - skipping VN');
-      }
-      if (typeof window.VNPlayer === 'undefined') {
-        console.log('[boot] VNPlayer not loaded - skipping VN');
-      }
-      startGame();
-    }
+    bootPhaser(payload);
   }
 
-  // -------------------- Your full platformer below (unchanged mechanics) --------------------
+  // -------------------- Platformer --------------------
 
   function bootPhaser(payload) {
     // Tunables
@@ -227,7 +146,6 @@
   let debugText;
   let bullets = []; // simple non-physics bullets
   let dropThroughUntil = 0;
-  let vnActive = false; // story overlay active
 
     // Pause + UI
     let gamePaused = false;
@@ -253,7 +171,7 @@
     let chatUI = null; // { container, messagesBox, inputDom, sendBtnDom, overlay }
     let chatActive = false;
 
-    // Create the Phaser game only after VN completes
+    // Create the Phaser game
     const game = new Phaser.Game(config);
 
     // Pause/resume on window blur/focus
@@ -376,17 +294,12 @@
       bg.setStrokeStyle(1, 0xffffff, 0.6);
       healthText = this.add.text(8, 6, `HP: ${health}`, { font: '14px monospace', color: '#ffffff' });
 
-      // Story button
-      const storyBtn = this.add.image(100, 4, 'invBtnTex').setOrigin(0, 0).setInteractive({ useHandCursor: true });
-      const storyLabel = this.add.text(122, 8, 'Story', { font: '12px monospace', color: '#ffffff' });
-      storyBtn.on('pointerup', () => launchVN(this));
-
       // Inventory button
-      const btn = this.add.image(190, 4, 'invBtnTex').setOrigin(0, 0).setInteractive({ useHandCursor: true });
-      const btnLabel = this.add.text(210, 8, 'Inventory', { font: '12px monospace', color: '#ffffff' });
+      const btn = this.add.image(100, 4, 'invBtnTex').setOrigin(0, 0).setInteractive({ useHandCursor: true });
+      const btnLabel = this.add.text(120, 8, 'Inventory', { font: '12px monospace', color: '#ffffff' });
 
   btn.on('pointerup', () => toggleInventory(this, true));
-  statusBar.add([bg, healthText, storyBtn, storyLabel, btn, btnLabel]);
+  statusBar.add([bg, healthText, btn, btnLabel]);
     }
 
     function createInventoryUI() {
@@ -465,81 +378,6 @@
     function setPaused(scene, paused) {
       gamePaused = paused;
       scene.matter.world.enabled = !paused;
-    }
-
-    function manifestFromPayload() {
-      console.log('[manifestFromPayload] Called');
-      console.log('[manifestFromPayload] payload.manifestUrl:', payload.manifestUrl);
-      console.log('[manifestFromPayload] payload.packBaseUrl:', payload.packBaseUrl);
-      
-      let manifestUrl = payload.manifestUrl || (payload.packBaseUrl ? (payload.packBaseUrl + '/manifest.json') : null);
-      console.log('[manifestFromPayload] Initial manifestUrl:', manifestUrl);
-      
-      // Convert absolute server path to relative file path if using file:// protocol
-      if (manifestUrl && window.location.protocol === 'file:' && manifestUrl.startsWith('/')) {
-        console.log('[manifestFromPayload] Converting file:// path from:', manifestUrl);
-        // From game.html at <project>/src/frontend/game.html to story_pack at project root
-        manifestUrl = '../../../../../story_pack' + manifestUrl.substring('/story_pack'.length);
-        console.log('[manifestFromPayload] Converted to:', manifestUrl);
-      }
-      
-      console.log('[manifestFromPayload] Returning:', manifestUrl);
-      return manifestUrl;
-    }
-
-    function launchVN(scene) {
-      console.log('[launchVN] Called');
-      const manifestUrl = manifestFromPayload();
-      
-      if (!manifestUrl) { 
-        console.error('[launchVN] No manifestUrl available - payload:', {
-          manifestUrl: payload.manifestUrl,
-          packBaseUrl: payload.packBaseUrl,
-          allKeys: Object.keys(payload)
-        });
-        showToast(scene, 'No story available'); 
-        return; 
-      }
-      
-      if (typeof window.VNPlayer === 'undefined') { 
-        console.error('[launchVN] VNPlayer not loaded');
-        showToast(scene, 'Story engine not loaded'); 
-        return; 
-      }
-      
-      if (vnActive) {
-        console.log('[launchVN] VN already active, skipping');
-        return;
-      }
-      
-      try {
-        console.log('[launchVN] Starting VN with manifest:', manifestUrl);
-        const root = document.getElementById('game-root');
-        const player = VNPlayer.create({
-          rootEl: root,
-          typeSpeed: 16,
-          onEnd: () => { 
-            console.log('[launchVN] VN ended');
-            vnActive = false; 
-            setPaused(scene, false); 
-          }
-        });
-        vnActive = true;
-        setPaused(scene, true);
-        player.loadAndStart(manifestUrl).catch(err => {
-          console.error('[launchVN] Failed to start VN:', err);
-          console.error('[launchVN] Manifest URL was:', manifestUrl);
-          vnActive = false;
-          setPaused(scene, false);
-          showToast(scene, 'Failed to load story: ' + err.message);
-        });
-      } catch (e) {
-        console.error('[launchVN] Exception while launching VN:', e);
-        console.error('[launchVN] Stack trace:', e.stack);
-        vnActive = false;
-        setPaused(scene, false);
-        showToast(scene, 'Story unavailable: ' + e.message);
-      }
     }
 
     // Chat UI

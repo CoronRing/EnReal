@@ -1,22 +1,33 @@
-# app/processing.py
+"""Image to stage pipeline: decode, detect edges, clean them, and build the skeleton.
+
+Entry point: :func:`generate_skeleton`. Everything here is pure: it takes image bytes
+and returns a :class:`~enreal.models.StageResult`, with no file, network or
+environment access.
+"""
+
+from __future__ import annotations
+
 import base64
 import logging
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Literal
+from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
 
+from .boundary_extraction import extract_boundary
 from .geometry import (
     Segment,
     segment_length,
-    snap_segments_to_grid,
     snap_points_to_grid,
+    snap_segments_to_grid,
 )
-from .boundary_extraction import extract_boundary
-from .models import ProcessResponse, Skeleton, Bounds, Point, Meta
+from .models import Bounds, Meta, Point, PolylineModel, Skeleton, StageResult
 
-logger = logging.getLogger("enreal")
+logger = logging.getLogger(__name__)
+
+Scene: TypeAlias = Literal["ui", "art"]
+"""Detection preset. ``"ui"`` suits screenshots and documents, ``"art"`` suits scenes and artwork."""
 
 
 @dataclass
@@ -24,7 +35,7 @@ class PipelineParams:
     # Common
     max_dim: int = 1280
     grid_size: int = 8
-    # Orientation thresholds removed (treat all segments uniformly as platforms)
+    # All straight segments are treated uniformly as platforms.
     min_platform_len_pct: float = 0.22
     max_platforms: int = 200
 
@@ -42,18 +53,18 @@ class PipelineParams:
     bilateral_sigmaColor: int = 50
     bilateral_sigmaSpace: int = 7
 
-    # Detection/selection (Hough used only if you re-enable line segments)
+    # Detection/selection for straight line segments, which the pipeline does not emit today.
     hough_min_len_ratio: float = 0.03
     hough_max_gap_ratio: float = 0.006
     hough_threshold_ratio: float = 0.02
     keep_top_ratio: float = 1.0  # keep all by default
 
-    # New: Edge-map postprocessing to remove speckle and keep only “real” boundaries
-    edge_close_ksize: int = 3                     # small closing to bridge tiny gaps
+    # Edge-map postprocessing: remove speckle and keep only real region boundaries.
+    edge_close_ksize: int = 3  # small closing to bridge tiny gaps
     min_edge_component_pixels_ratio: float = 0.0002  # remove edge CCs smaller than this fraction of image area
-    min_edge_bbox_diag_ratio: float = 0.01        # also require a minimum bbox diagonal relative to image max(H,W)
-    min_region_area_ratio: float = 0.004          # keep edges that separate regions at least this big
-    thinning: bool = True                         # thin after filtering for cleaner curves
+    min_edge_bbox_diag_ratio: float = 0.01  # also require a minimum bbox diagonal relative to image max(H,W)
+    min_region_area_ratio: float = 0.004  # keep edges that separate regions at least this big
+    thinning: bool = True  # thin after filtering for cleaner curves
 
 
 def _downscale(image: np.ndarray, max_dim: int) -> np.ndarray:
@@ -81,7 +92,7 @@ def _auto_canny(gray: np.ndarray, sigma: float = 0.33) -> np.ndarray:
     return edges
 
 
-def _detect_dominant_quad(gray: np.ndarray) -> Optional[np.ndarray]:
+def _detect_dominant_quad(gray: np.ndarray) -> np.ndarray | None:
     h, w = gray.shape[:2]
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
@@ -92,7 +103,7 @@ def _detect_dominant_quad(gray: np.ndarray) -> Optional[np.ndarray]:
         return None
     img_area = w * h
     best = None
-    best_area = 0
+    best_area = 0.0
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < 0.15 * img_area:
@@ -114,9 +125,12 @@ def _detect_dominant_quad(gray: np.ndarray) -> Optional[np.ndarray]:
     return ordered
 
 
-def _warp_to_topdown(bgr: np.ndarray, quad: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _warp_to_topdown(bgr: np.ndarray, quad: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     (tl, tr, br, bl) = quad
-    def dist(a, b): return float(np.hypot(*(a - b)))
+
+    def dist(a: np.ndarray, b: np.ndarray) -> float:
+        return float(np.hypot(*(a - b)))
+
     w_top, w_bottom = dist(tl, tr), dist(bl, br)
     h_left, h_right = dist(tl, bl), dist(tr, br)
     width = int(round(max(w_top, w_bottom)))
@@ -130,7 +144,7 @@ def _warp_to_topdown(bgr: np.ndarray, quad: np.ndarray) -> Tuple[np.ndarray, np.
     return warped, H, H_inv
 
 
-def _apply_H(pt: Tuple[float, float], H: np.ndarray) -> Tuple[float, float]:
+def _apply_H(pt: tuple[float, float], H: np.ndarray) -> tuple[float, float]:
     x, y = pt
     vec = np.array([x, y, 1.0], dtype=np.float64)
     out = H.dot(vec)
@@ -138,8 +152,8 @@ def _apply_H(pt: Tuple[float, float], H: np.ndarray) -> Tuple[float, float]:
     return float(out[0]), float(out[1])
 
 
-def _map_segments(segments: List[Segment], H: np.ndarray) -> List[Segment]:
-    out: List[Segment] = []
+def _map_segments(segments: list[Segment], H: np.ndarray) -> list[Segment]:
+    out: list[Segment] = []
     for s in segments:
         x1, y1 = _apply_H((s.x1, s.y1), H)
         x2, y2 = _apply_H((s.x2, s.y2), H)
@@ -147,9 +161,10 @@ def _map_segments(segments: List[Segment], H: np.ndarray) -> List[Segment]:
     return out
 
 
-def _hough_segments_from_edge_map(edge_map: np.ndarray, h: int, w: int,
-                                  min_len_ratio: float, max_gap_ratio: float, thr_ratio: float) -> List[Segment]:
-    e_u8 = (edge_map.astype(np.uint8) * 255)
+def _hough_segments_from_edge_map(
+    edge_map: np.ndarray, h: int, w: int, min_len_ratio: float, max_gap_ratio: float, thr_ratio: float
+) -> list[Segment]:
+    e_u8 = edge_map.astype(np.uint8) * 255
     diag = float(np.hypot(h, w))
     min_len = max(10, int(min_len_ratio * max(h, w)))
     max_gap = max(6, int(max_gap_ratio * max(h, w)))
@@ -162,7 +177,7 @@ def _hough_segments_from_edge_map(edge_map: np.ndarray, h: int, w: int,
         minLineLength=min_len,
         maxLineGap=max_gap,
     )
-    segs: List[Segment] = []
+    segs: list[Segment] = []
     if lines is not None:
         for line in lines:
             x1, y1, x2, y2 = map(int, line[0])
@@ -179,9 +194,9 @@ def _enhance_for_art(gray: np.ndarray, params: PipelineParams) -> np.ndarray:
     bgr2 = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
     gray2 = cv2.cvtColor(bgr2, cv2.COLOR_BGR2GRAY)
     if params.use_bilateral:
-        gray2 = cv2.bilateralFilter(gray2, d=params.bilateral_d,
-                                    sigmaColor=params.bilateral_sigmaColor,
-                                    sigmaSpace=params.bilateral_sigmaSpace)
+        gray2 = cv2.bilateralFilter(
+            gray2, d=params.bilateral_d, sigmaColor=params.bilateral_sigmaColor, sigmaSpace=params.bilateral_sigmaSpace
+        )
     return gray2
 
 
@@ -198,7 +213,7 @@ def _segment_mean_grad(seg: Segment, grad: np.ndarray, step: int = 3) -> float:
     ys = np.linspace(seg.y1, seg.y2, n).astype(np.int32)
     H, W = grad.shape
     vals = []
-    for x, y in zip(xs, ys):
+    for x, y in zip(xs, ys, strict=False):
         if 0 <= x < W and 0 <= y < H:
             vals.append(float(grad[y, x]))
     return float(np.mean(vals)) if vals else 0.0
@@ -211,7 +226,7 @@ def _segment_edge_coverage(seg: Segment, edges: np.ndarray, step: int = 2) -> fl
     H, W = edges.shape
     hits = 0
     total = 0
-    for x, y in zip(xs, ys):
+    for x, y in zip(xs, ys, strict=False):
         if 0 <= x < W and 0 <= y < H:
             total += 1
             if edges[y, x] > 0:
@@ -225,37 +240,44 @@ def _text_mask(gray: np.ndarray) -> np.ndarray:
     min_area = int(0.00002 * area)
     max_area = int(0.01 * area)
     try:
-        mser = cv2.MSER_create(_delta=3, _min_area=min_area, _max_area=max_area)
+        mser = cv2.MSER_create(_delta=3, _min_area=min_area, _max_area=max_area)  # type: ignore[attr-defined]
     except TypeError:
-        mser = cv2.MSER_create(3, min_area, max_area)
+        mser = cv2.MSER_create(3, min_area, max_area)  # type: ignore[attr-defined]
     regions, _ = mser.detectRegions(gray)
-    mask = np.zeros_like(gray, dtype=np.uint8)
+    mask: np.ndarray = np.zeros_like(gray, dtype=np.uint8)
     for r in regions:
         r = np.array(r, dtype=np.int32).reshape((-1, 1, 2))
-        cv2.fillPoly(mask, [r], 255)
+        cv2.fillPoly(mask, [r], (255,))
     k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     mask = cv2.dilate(mask, k, iterations=2)
     return mask
 
 
-def _draw_overlay(base_bgr: np.ndarray, segments: List[Segment], color=(0, 0, 255), thickness=2) -> np.ndarray:
+def _draw_overlay(
+    base_bgr: np.ndarray,
+    segments: list[Segment],
+    color: tuple[int, int, int] = (0, 0, 255),
+    thickness: int = 2,
+) -> np.ndarray:
     overlay = base_bgr.copy()
     for s in segments:
         cv2.line(overlay, (int(s.x1), int(s.y1)), (int(s.x2), int(s.y2)), color, thickness, lineType=cv2.LINE_AA)
     return overlay
 
 
-# --------------------- New: Edge-map postprocessing ---------------------
+# --------------------- Edge-map postprocessing ---------------------
+
 
 def _morph_close(edge_map: np.ndarray, ksize: int) -> np.ndarray:
     ksize = max(1, int(ksize))
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
     closed = cv2.morphologyEx(edge_map.astype(np.uint8) * 255, cv2.MORPH_CLOSE, k, iterations=1)
-    return (closed > 0)
+    return closed > 0
 
 
-def _remove_small_edge_components(edge_map: np.ndarray, H: int, W: int,
-                                  min_pixels_ratio: float, min_bbox_diag_ratio: float) -> np.ndarray:
+def _remove_small_edge_components(
+    edge_map: np.ndarray, H: int, W: int, min_pixels_ratio: float, min_bbox_diag_ratio: float
+) -> np.ndarray:
     """
     Remove connected components in the edge map that are too small by pixel count
     and by bounding-box diagonal length.
@@ -322,7 +344,8 @@ def _thin_edges(edge_map: np.ndarray) -> np.ndarray:
     """
     try:
         from cv2.ximgproc import thinning  # type: ignore[attr-defined]
-        e_u8 = (edge_map.astype(np.uint8) * 255)
+
+        e_u8 = edge_map.astype(np.uint8) * 255
         th = thinning(e_u8, thinningType=1)  # Guo-Hall
         return th > 0
     except Exception:
@@ -342,7 +365,9 @@ def _postprocess_edge_map(edge_map: np.ndarray, params: PipelineParams, H: int, 
 
     # 2) Remove tiny edge connected components (noise specks)
     edge_map = _remove_small_edge_components(
-        edge_map, H, W,
+        edge_map,
+        H,
+        W,
         min_pixels_ratio=params.min_edge_component_pixels_ratio,
         min_bbox_diag_ratio=params.min_edge_bbox_diag_ratio,
     )
@@ -364,16 +389,44 @@ def generate_skeleton(
     grid_size: int = 8,
     min_platform_len_pct: float = 0.22,
     max_platforms: int = 200,
-    # scene = "ui" or "art"
-    scene: Literal["ui", "art"] = "ui",
+    scene: Scene = "ui",
     rectify_perspective: bool = True,
     text_suppression: bool = True,
-) -> ProcessResponse:
+) -> StageResult:
+    """Detect playable terrain in an image and return it as a stage.
+
+    Args:
+        image_bytes: Encoded image (PNG, JPEG, WebP, BMP or anything else OpenCV decodes).
+        max_dim: The image is downscaled so its longest side is at most this many
+            pixels before processing. All output coordinates are in this downscaled space.
+        grid_size: Output points are snapped to a grid of this many pixels.
+        min_platform_len_pct: Reserved for straight-platform detection, which the
+            pipeline does not run yet. Recorded in ``meta``; no effect on the output.
+        max_platforms: Reserved like ``min_platform_len_pct``. No effect on the output.
+        scene: ``"ui"`` for screenshots and documents (optional perspective rectification,
+            stricter region filtering), ``"art"`` for scenes and artwork (looser region
+            filtering, so smaller features survive).
+        rectify_perspective: ``"ui"`` only. Warp a dominant quadrilateral to top-down first.
+        text_suppression: ``"ui"`` only. Recorded in ``meta``; the text detector is not
+            wired into the pipeline yet, so it has no effect on the output.
+
+    Returns:
+        The skeleton plus the red edge overlay the game uses as collision terrain.
+
+    Raises:
+        ValueError: If a parameter is out of range or the bytes are not a decodable image.
     """
-    Generates skeleton lines with two scene modes:
-      - ui: optimized for documents/web screenshots (rectification, text suppression)
-      - art: optimized for scenes/concept art (contrast enhancement, texture suppression)
-    """
+    if max_dim <= 0:
+        raise ValueError(f"max_dim must be positive, got {max_dim}")
+    if grid_size <= 0:
+        raise ValueError(f"grid_size must be positive, got {grid_size}")
+    if not 0.0 <= min_platform_len_pct <= 1.0:
+        raise ValueError(f"min_platform_len_pct must be within [0, 1], got {min_platform_len_pct}")
+    if max_platforms < 0:
+        raise ValueError(f"max_platforms must be non-negative, got {max_platforms}")
+    if scene not in ("ui", "art"):
+        raise ValueError(f"scene must be 'ui' or 'art', got {scene!r}")
+
     params = PipelineParams(
         max_dim=max_dim,
         grid_size=grid_size,
@@ -385,7 +438,6 @@ def generate_skeleton(
         params.text_suppression = text_suppression
         params.use_clahe = False
         params.use_bilateral = False
-        params.grad_quantile_keep = 0.5
         # For UI, boundaries are often large blocks; be stricter
         params.min_edge_component_pixels_ratio = 0.0003
         params.min_region_area_ratio = 0.006
@@ -394,7 +446,6 @@ def generate_skeleton(
         params.text_suppression = False
         params.use_clahe = True
         params.use_bilateral = True
-        params.grad_quantile_keep = 0.55
         # For art, allow slightly smaller regions
         params.min_edge_component_pixels_ratio = 0.0002
         params.min_region_area_ratio = 0.004
@@ -403,7 +454,7 @@ def generate_skeleton(
     img_array = np.frombuffer(image_bytes, np.uint8)
     bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     if bgr is None:
-        raise RuntimeError("Unsupported or corrupted image.")
+        raise ValueError("Unsupported or corrupted image: OpenCV could not decode it.")
     bgr = _downscale(bgr, params.max_dim)
     H_img, W_img = bgr.shape[:2]
 
@@ -422,34 +473,36 @@ def generate_skeleton(
         work_bgr,
         mode="edges",
         edge_mode="all",
-        hough=True,              # Hough reinforcement still helps connect straight dividers
+        hough=True,  # Hough reinforcement still helps connect straight dividers
         return_debug=False,
-        log_level=logging.INFO,
     )
-    edge_map = be_result.edge_map if be_result.edge_map is not None else None
+    if be_result.status == "error":
+        # Without this the stage would come back empty, indistinguishable from a blank image.
+        raise RuntimeError("Edge extraction failed: " + "; ".join(be_result.errors))
+    edge_map = be_result.edge_map
 
-    # New: postprocess the edge map to remove speckle and keep only meaningful boundaries
+    # Postprocess the edge map to remove speckle and keep only meaningful boundaries
     if edge_map is not None and edge_map.any():
         edge_map = _postprocess_edge_map(edge_map, params, H_work, W_work)
         # Map back if rectified
         if params.rectify_perspective:
             # Warp boolean mask back with nearest-neighbor
-            edge_u8 = (edge_map.astype(np.uint8) * 255)
+            edge_u8 = edge_map.astype(np.uint8) * 255
             edge_back = cv2.warpPerspective(edge_u8, H_inv, (W_img, H_img), flags=cv2.INTER_NEAREST)
-            edge_map = (edge_back > 0)
+            edge_map = edge_back > 0
         else:
             # Ensure size matches original
             if (H_work, W_work) != (H_img, W_img):
                 edge_map = cv2.resize(edge_map.astype(np.uint8), (W_img, H_img), interpolation=cv2.INTER_NEAREST) > 0
 
     # Build pixel-level polylines (curves) from cleaned edge map
-    platforms: List[Segment] = []
-    barriers: List[Segment] = []
-    ramps: List[Segment] = []
+    platforms: list[Segment] = []
+    barriers: list[Segment] = []
+    ramps: list[Segment] = []
 
-    curves_points: List[List[Tuple[int, int]]] = []
+    curves_points: list[list[tuple[int, int]]] = []
     if edge_map is not None and edge_map.any():
-        edge_u8 = (edge_map.astype(np.uint8) * 255)
+        edge_u8 = edge_map.astype(np.uint8) * 255
         contours, _ = cv2.findContours(edge_u8, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
         # Filter out tiny contours again by arc length to be safe
         min_len_pixels = max(30, int(params.min_edge_bbox_diag_ratio * max(H_img, W_img)))
@@ -464,7 +517,7 @@ def generate_skeleton(
                 clamped.append((max(0, min(W_img - 1, x)), max(0, min(H_img - 1, y))))
             curves_points.append(clamped)
 
-    # Map back line segments if you add them later
+    # Map straight segments back through the rectification homography
     if params.rectify_perspective:
         platforms = _map_segments(platforms, H_inv)
         barriers = _map_segments(barriers, H_inv)
@@ -481,13 +534,15 @@ def generate_skeleton(
     platforms = [clamp(s) for s in snap_segments_to_grid(platforms, params.grid_size)]
 
     bounds = Bounds(x=0, y=0, width=W_img, height=H_img)
-    def choose_spawn(plats: List[Segment], w: int, h: int) -> Tuple[int, int]:
+
+    def choose_spawn(plats: list[Segment], w: int, h: int) -> tuple[int, int]:
         if plats:
             lowest = max(plats, key=lambda s: (s.y1 + s.y2) * 0.5)
             xm = int(round((lowest.x1 + lowest.x2) * 0.5))
             y = int(round((lowest.y1 + lowest.y2) * 0.5)) - 1
             return xm, max(0, min(h - 1, y))
         return w // 2, int(h * 0.9)
+
     _sx, _sy = choose_spawn(platforms, W_img, H_img)
     spawn = Point(x=_sx, y=_sy)
 
@@ -510,7 +565,6 @@ def generate_skeleton(
         overlay[edge_map] = (0, 0, 255)
     overlay_b64 = _encode_png_base64(overlay)
 
-    from .models import PolylineModel
     skeleton = Skeleton(
         bounds=bounds,
         spawn=spawn,
@@ -520,6 +574,4 @@ def generate_skeleton(
         curves=[PolylineModel(points=[Point(x=p[0], y=p[1]) for p in poly]) for poly in curves_points],
         meta=meta,
     )
-    # NOTE: models.ProcessResponse currently expects skeleton as a plain Dict, not a Skeleton model.
-    # Convert to dict to satisfy Pydantic validation.
-    return ProcessResponse(skeleton=skeleton.model_dump(), overlay_image_b64=overlay_b64)
+    return StageResult(skeleton=skeleton, overlay_image_b64=overlay_b64)

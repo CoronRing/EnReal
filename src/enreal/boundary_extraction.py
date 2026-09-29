@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 boundary_extraction.py
 
-Improved color- and scale-aware boundary/edge extraction.
+Color- and scale-aware boundary/edge extraction.
 
-What’s new vs. earlier version:
+Features:
 - Multichannel, multiscale edge detection (Lab channels, multiple blur scales)
 - Optional Hough line reinforcement for long straight dividers
 - Optional superpixel-based region boundary selection by color contrast (DeltaE)
 - Unicode-safe image loader (np.fromfile + cv2.imdecode) for Windows paths
 
 Dependencies:
-- Python 3.8+
 - numpy
-- opencv-python
+- OpenCV
 - Optional: scikit-image (for superpixel-based region boundaries). Install with:
     pip install scikit-image
 
@@ -47,14 +45,11 @@ Result data structure (BoundaryResult):
         - "edges_hough": edge map after Hough reinforcement (if enabled)
         - "edges_superpixel": superpixel-based boundary map (if enabled and available)
         - "edge_overlay": BGR overlay of edge_map on original
-        - "overlay": previous boundary overlay (if primary contour exists)
+        - "overlay": primary contour boundary overlay (if a primary contour exists)
     errors: List[str]
         Any warnings/errors encountered.
     meta: Dict[str, Any]
         Parameters used and small stats (thresholds, scales, etc.).
-
-CLI examples (Windows PowerShell):
-    python .\boundary_extraction.py "C:\path\to\image.png" --mode edges --edge-mode all --hough --deltaE 12 --out-dir out --debug
 """
 
 from __future__ import annotations
@@ -62,45 +57,36 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import cv2
 import numpy as np
 
-try:
-    from skimage.segmentation import slic, find_boundaries
-    HAVE_SKIMAGE = True
-except Exception:
-    HAVE_SKIMAGE = False
-
-# Configure logger
-logger = logging.getLogger("boundary_extraction")
-handler = logging.StreamHandler(stream=sys.stdout)
-formatter = logging.Formatter("[%(levelname)s] %(asctime)s - %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(logging.INFO)
+# A library never configures handlers; the CLI in main() does that for itself.
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class BoundaryResult:
     status: str
-    boundary_mask: Optional[np.ndarray]
-    object_mask: Optional[np.ndarray]
-    contours: List[np.ndarray]
-    polygon: Optional[np.ndarray]
-    hierarchy: Optional[np.ndarray]
-    edge_map: Optional[np.ndarray]
-    debug: Dict[str, np.ndarray]
-    errors: List[str]
-    meta: Dict[str, Any]
+    boundary_mask: np.ndarray | None
+    object_mask: np.ndarray | None
+    contours: list[np.ndarray]
+    polygon: np.ndarray | None
+    hierarchy: np.ndarray | None
+    edge_map: np.ndarray | None
+    debug: dict[str, np.ndarray]
+    errors: list[str]
+    meta: dict[str, Any]
 
 
 # -------------------- Utilities --------------------
 
-def _read_image(source: Union[str, Path, np.ndarray]) -> Optional[np.ndarray]:
+
+def _read_image(source: str | Path | np.ndarray) -> np.ndarray | None:
     """
     Load an image from a path or pass-through if ndarray.
     Returns BGR uint8 image or None on failure.
@@ -148,13 +134,13 @@ def _read_image(source: Union[str, Path, np.ndarray]) -> Optional[np.ndarray]:
         return None
 
 
-def _to_gray_enhanced(bgr: np.ndarray, clip_limit: float = 2.0, tile_grid: Tuple[int, int] = (8, 8)) -> np.ndarray:
+def _to_gray_enhanced(bgr: np.ndarray, clip_limit: float = 2.0, tile_grid: tuple[int, int] = (8, 8)) -> np.ndarray:
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid)
     return clahe.apply(gray)
 
 
-def _auto_canny_thresholds(gray: np.ndarray, low_ratio: float = 0.33) -> Tuple[int, int]:
+def _auto_canny_thresholds(gray: np.ndarray, low_ratio: float = 0.33) -> tuple[int, int]:
     v = float(np.median(gray))
     lower = int(max(0, (1.0 - low_ratio) * v))
     upper = int(min(255, (1.0 + low_ratio) * v))
@@ -170,7 +156,9 @@ def _approx_polygon(contour: np.ndarray, epsilon_ratio: float = 0.01) -> np.ndar
     return approx.reshape(-1, 2).astype(np.float32)
 
 
-def _largest_external_contour(contours: List[np.ndarray], hierarchy: Optional[np.ndarray], min_area: float) -> Optional[np.ndarray]:
+def _largest_external_contour(
+    contours: Sequence[np.ndarray], hierarchy: np.ndarray | None, min_area: float
+) -> np.ndarray | None:
     if not contours:
         return None
     best = None
@@ -189,11 +177,11 @@ def _largest_external_contour(contours: List[np.ndarray], hierarchy: Optional[np
     return best
 
 
-def _make_mask_from_contour(shape: Tuple[int, int], contour: np.ndarray) -> np.ndarray:
+def _make_mask_from_contour(shape: tuple[int, int], contour: np.ndarray) -> np.ndarray:
     h, w = shape
     mask = np.zeros((h, w), dtype=np.uint8)
     c = contour.reshape(-1, 1, 2).astype(np.int32)
-    cv2.fillPoly(mask, [c], 255)
+    cv2.fillPoly(mask, [c], (255,))
     return mask > 0
 
 
@@ -207,6 +195,7 @@ def _boundary_from_mask(mask: np.ndarray, width: int = 3) -> np.ndarray:
 
 # -------------------- Color- and scale-aware edges --------------------
 
+
 def _edges_canny_gray(bgr: np.ndarray, blur_ksize: int, sigma_ratio: float) -> np.ndarray:
     gray = _to_gray_enhanced(bgr)
     if blur_ksize and blur_ksize > 1:
@@ -216,10 +205,10 @@ def _edges_canny_gray(bgr: np.ndarray, blur_ksize: int, sigma_ratio: float) -> n
     return cv2.Canny(gray, tl, th) > 0
 
 
-def _edges_canny_lab(bgr: np.ndarray, blur_ksize: int, sigma_ratio: float) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+def _edges_canny_lab(bgr: np.ndarray, blur_ksize: int, sigma_ratio: float) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    edges_union = None
-    debug = {}
+    edges_union: np.ndarray | None = None
+    debug: dict[str, np.ndarray] = {}
     for idx, name in enumerate(["L", "a", "b"]):
         ch = lab[..., idx]
         if blur_ksize and blur_ksize > 1:
@@ -228,44 +217,54 @@ def _edges_canny_lab(bgr: np.ndarray, blur_ksize: int, sigma_ratio: float) -> Tu
         tl, th = _auto_canny_thresholds(ch, sigma_ratio)
         e = cv2.Canny(ch, tl, th) > 0
         edges_union = e if edges_union is None else (edges_union | e)
-        debug[f"edges_lab_{name}"] = (e.astype(np.uint8) * 255)
+        debug[f"edges_lab_{name}"] = e.astype(np.uint8) * 255
+    assert edges_union is not None  # the loop always runs over three channels
     return edges_union, debug
 
 
-def _edges_multiscale_lab(bgr: np.ndarray, scales: Tuple[int, ...], sigma_ratio: float) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+def _edges_multiscale_lab(
+    bgr: np.ndarray, scales: tuple[int, ...], sigma_ratio: float
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """
     Run Canny on Lab channels at multiple blur scales and union the results.
     scales: tuple of odd kernel sizes (e.g., 3, 5, 9 or 5, 9, 13)
     """
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    union = None
-    debug = {}
+    union: np.ndarray | None = None
+    debug: dict[str, np.ndarray] = {}
     for k in scales:
         k = k if k % 2 == 1 else k + 1
-        layer = None
+        layer: np.ndarray | None = None
         for idx in range(3):
             ch = lab[..., idx]
             ch_blur = cv2.GaussianBlur(ch, (k, k), 0)
             tl, th = _auto_canny_thresholds(ch_blur, sigma_ratio)
             e = cv2.Canny(ch_blur, tl, th) > 0
             layer = e if layer is None else (layer | e)
+        assert layer is not None  # three channels per scale
         union = layer if union is None else (union | layer)
-        debug[f"edges_multiscale_k{k}"] = (layer.astype(np.uint8) * 255)
+        debug[f"edges_multiscale_k{k}"] = layer.astype(np.uint8) * 255
+    if union is None:
+        raise ValueError("scales must contain at least one kernel size")
     return union, debug
 
 
-def _reinforce_with_hough(edge_map: np.ndarray, min_line_len: int = 60, max_line_gap: int = 10, thickness: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+def _reinforce_with_hough(
+    edge_map: np.ndarray, min_line_len: int = 60, max_line_gap: int = 10, thickness: int = 1
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Strengthen long straight edges using probabilistic Hough transform.
     """
     h, w = edge_map.shape
-    e_u8 = (edge_map.astype(np.uint8) * 255)
-    lines = cv2.HoughLinesP(e_u8, rho=1, theta=np.pi/180, threshold=80,
-                            minLineLength=min_line_len, maxLineGap=max_line_gap)
+    e_u8 = edge_map.astype(np.uint8) * 255
+    lines = cv2.HoughLinesP(
+        e_u8, rho=1, theta=np.pi / 180, threshold=80, minLineLength=min_line_len, maxLineGap=max_line_gap
+    )
     out = e_u8.copy()
     if lines is not None:
-        for x1, y1, x2, y2 in lines[:, 0]:
-            cv2.line(out, (x1, y1), (x2, y2), 255, thickness=thickness, lineType=cv2.LINE_AA)
+        # OpenCV 4 returns shape (N, 1, 4) and OpenCV 5 returns (N, 4); reshape covers both.
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            cv2.line(out, (int(x1), int(y1)), (int(x2), int(y2)), (255,), thickness=thickness, lineType=cv2.LINE_AA)
     return out > 0, out
 
 
@@ -274,16 +273,20 @@ def _deltaE94(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
     dl = lab1[..., 0] - lab2[..., 0]
     da = lab1[..., 1] - lab2[..., 1]
     db = lab1[..., 2] - lab2[..., 2]
-    return np.sqrt(dl*dl + da*da + db*db)
+    return np.sqrt(dl * dl + da * da + db * db)
 
 
-def _superpixel_strong_boundaries(bgr: np.ndarray, n_segments: int, compactness: float, deltaE_thresh: float) -> Optional[np.ndarray]:
+def _superpixel_strong_boundaries(
+    bgr: np.ndarray, n_segments: int, compactness: float, deltaE_thresh: float
+) -> np.ndarray | None:
     """
     Use superpixels to get region boundaries with large color contrast.
     Returns boolean edge map or None if skimage is unavailable.
     """
-    if not HAVE_SKIMAGE:
-        logger.warning("scikit-image not available; skipping superpixel-based boundaries.")
+    try:
+        from skimage.segmentation import find_boundaries, slic  # type: ignore
+    except Exception:
+        logger.debug("scikit-image not available; skipping superpixel-based boundaries.")
         return None
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     # skimage expects RGB float in [0,1]
@@ -295,7 +298,7 @@ def _superpixel_strong_boundaries(bgr: np.ndarray, n_segments: int, compactness:
     label_ids = np.unique(labels)
     means = np.zeros((label_ids.max() + 1, 3), dtype=np.float32)
     for lbl in label_ids:
-        mask = (labels == lbl)
+        mask = labels == lbl
         if mask.any():
             means[lbl] = lab[mask].mean(axis=0)
 
@@ -303,8 +306,8 @@ def _superpixel_strong_boundaries(bgr: np.ndarray, n_segments: int, compactness:
     strong = np.zeros_like(boundaries, dtype=bool)
     H, W = labels.shape
     for dy, dx in [(0, 1), (1, 0)]:
-        y2 = np.clip(np.arange(H)[:, None] + dy, 0, H-1)
-        x2 = np.clip(np.arange(W)[None, :] + dx, 0, W-1)
+        y2 = np.clip(np.arange(H)[:, None] + dy, 0, H - 1)
+        x2 = np.clip(np.arange(W)[None, :] + dx, 0, W - 1)
         l1 = labels
         l2 = labels[y2, x2]
         diff = l1 != l2
@@ -312,11 +315,11 @@ def _superpixel_strong_boundaries(bgr: np.ndarray, n_segments: int, compactness:
             m1 = means[l1]
             m2 = means[l2]
             de = _deltaE94(m1, m2)
-            strong |= (diff & (de > deltaE_thresh))
+            strong |= diff & (de > deltaE_thresh)
     return strong
 
 
-def _overlay_edges(bgr: np.ndarray, edge_map: np.ndarray, color=(0, 0, 255)) -> np.ndarray:
+def _overlay_edges(bgr: np.ndarray, edge_map: np.ndarray, color: tuple[int, int, int] = (0, 0, 255)) -> np.ndarray:
     out = bgr.copy()
     out[edge_map] = color
     return out
@@ -324,20 +327,21 @@ def _overlay_edges(bgr: np.ndarray, edge_map: np.ndarray, color=(0, 0, 255)) -> 
 
 # -------------------- Main extractor --------------------
 
+
 def extract_boundary(
-    image: Union[str, Path, np.ndarray],
+    image: str | Path | np.ndarray,
     # Overall mode
-    mode: str = "edges",  # "edges" for full edge map; "boundary" for single primary contour as before
-    # Primary-contour params (legacy/general)
+    mode: str = "edges",  # "edges" for full edge map; "boundary" to also find a single primary contour
+    # Primary-contour params
     strategy: str = "auto",
     min_area_ratio: float = 0.01,
     approx_epsilon_ratio: float = 0.01,
     boundary_width: int = 3,
     # Edge detection params
-    edge_mode: str = "all",   # "gray", "lab", "multiscale", "superpixel", "all"
+    edge_mode: str = "all",  # "gray", "lab", "multiscale", "superpixel", "all"
     blur_ksize: int = 5,
     canny_sigma_ratio: float = 0.33,
-    multiscale_ksizes: Tuple[int, ...] = (5, 9, 13),
+    multiscale_ksizes: tuple[int, ...] = (5, 9, 13),
     hough: bool = True,
     hough_min_line: int = 80,
     hough_max_gap: int = 12,
@@ -347,14 +351,14 @@ def extract_boundary(
     deltaE_thresh: float = 12.0,
     # Debug/logging
     return_debug: bool = True,
-    log_level: int = logging.INFO,
+    log_level: int | None = None,
 ) -> BoundaryResult:
     """
     Extract edges/boundaries with color and scale awareness.
 
     Parameters (key ones):
         mode: "edges" (default) to produce a dense edge_map capturing region boundaries,
-              or "boundary" to also try a primary outer contour (legacy behavior).
+              or "boundary" to also try a primary outer contour.
         edge_mode: which edge sources to use:
             - "gray": Canny on enhanced grayscale only
             - "lab": Canny on L,a,b channels union
@@ -362,28 +366,44 @@ def extract_boundary(
             - "superpixel": only superpixel-based high-contrast boundaries (requires scikit-image)
             - "all": union of multiscale Lab edges (+gray) and superpixel boundaries (if available)
         hough: if True, reinforce long straight edges with probabilistic Hough lines
+        log_level: if given, set this module's logger to that level; left alone otherwise
         deltaE_thresh: Lab color difference threshold for superpixel boundaries (higher -> fewer, stronger)
 
     Returns:
         BoundaryResult (see module docstring for full field descriptions)
     """
-    logger.setLevel(log_level)
-    errors: List[str] = []
-    debug: Dict[str, np.ndarray] = {}
-    meta: Dict[str, Any] = {
-        "mode": mode, "strategy": strategy, "edge_mode": edge_mode,
-        "blur_ksize": blur_ksize, "canny_sigma_ratio": canny_sigma_ratio,
-        "multiscale_ksizes": multiscale_ksizes, "hough": hough,
-        "superpixel_segments": superpixel_segments, "superpixel_compactness": superpixel_compactness,
-        "deltaE_thresh": deltaE_thresh, "boundary_width": boundary_width,
+    if log_level is not None:
+        logger.setLevel(log_level)
+    errors: list[str] = []
+    debug: dict[str, np.ndarray] = {}
+    meta: dict[str, Any] = {
+        "mode": mode,
+        "strategy": strategy,
+        "edge_mode": edge_mode,
+        "blur_ksize": blur_ksize,
+        "canny_sigma_ratio": canny_sigma_ratio,
+        "multiscale_ksizes": multiscale_ksizes,
+        "hough": hough,
+        "superpixel_segments": superpixel_segments,
+        "superpixel_compactness": superpixel_compactness,
+        "deltaE_thresh": deltaE_thresh,
+        "boundary_width": boundary_width,
     }
 
     bgr = _read_image(image)
     if bgr is None:
         errors.append("Failed to load image.")
         return BoundaryResult(
-            status="error", boundary_mask=None, object_mask=None, contours=[],
-            polygon=None, hierarchy=None, edge_map=None, debug=debug, errors=errors, meta=meta
+            status="error",
+            boundary_mask=None,
+            object_mask=None,
+            contours=[],
+            polygon=None,
+            hierarchy=None,
+            edge_map=None,
+            debug=debug,
+            errors=errors,
+            meta=meta,
         )
     H, W = bgr.shape[:2]
     img_area = float(H * W)
@@ -392,9 +412,9 @@ def extract_boundary(
     try:
         # Base gray edges
         edges_gray = _edges_canny_gray(bgr, blur_ksize=blur_ksize, sigma_ratio=canny_sigma_ratio)
-        debug["edges_gray"] = (edges_gray.astype(np.uint8) * 255)
+        debug["edges_gray"] = edges_gray.astype(np.uint8) * 255
 
-        edge_sources: List[np.ndarray] = []
+        edge_sources: list[np.ndarray] = []
 
         if edge_mode in ("gray", "all"):
             edge_sources.append(edges_gray)
@@ -410,16 +430,15 @@ def extract_boundary(
             edge_sources.append(e_ms)
             for k, v in d_ms.items():
                 debug[k] = v
-            debug["edges_multiscale"] = (e_ms.astype(np.uint8) * 255)
+            debug["edges_multiscale"] = e_ms.astype(np.uint8) * 255
 
         if edge_mode in ("superpixel", "all"):
             e_sp = _superpixel_strong_boundaries(
-                bgr, n_segments=superpixel_segments,
-                compactness=superpixel_compactness, deltaE_thresh=deltaE_thresh
+                bgr, n_segments=superpixel_segments, compactness=superpixel_compactness, deltaE_thresh=deltaE_thresh
             )
             if e_sp is not None:
                 edge_sources.append(e_sp)
-                debug["edges_superpixel"] = (e_sp.astype(np.uint8) * 255)
+                debug["edges_superpixel"] = e_sp.astype(np.uint8) * 255
 
         if not edge_sources:
             errors.append(f"No edge sources were selected for edge_mode='{edge_mode}'.")
@@ -443,18 +462,18 @@ def extract_boundary(
         errors.append(f"Edge pipeline error: {e!r}")
         edge_map = None
 
-    # ---------- Optional primary contour for legacy "boundary" mode ----------
+    # ---------- Optional primary contour for "boundary" mode ----------
     object_mask = None
     boundary_mask = None
-    contours: List[np.ndarray] = []
+    contours: list[np.ndarray] = []
     polygon = None
     hierarchy = None
 
     if mode == "boundary":
         try:
             gray = _to_gray_enhanced(bgr)
-            k = 5
-            gray_blur = cv2.GaussianBlur(gray, (k, k), 0)
+            blur_k = 5
+            gray_blur = cv2.GaussianBlur(gray, (blur_k, blur_k), 0)
             tl, th = _auto_canny_thresholds(gray_blur, canny_sigma_ratio)
             edges = cv2.Canny(gray_blur, tl, th)
             mk = 5
@@ -478,7 +497,11 @@ def extract_boundary(
             logger.exception("Primary contour pipeline failed: %s", e)
             errors.append(f"Primary contour error: {e!r}")
 
-    status = "ok" if (edge_map is not None and edge_map.any()) or (boundary_mask is not None and boundary_mask.any()) else ("partial" if edge_map is not None else "error")
+    status = (
+        "ok"
+        if (edge_map is not None and edge_map.any()) or (boundary_mask is not None and boundary_mask.any())
+        else ("partial" if edge_map is not None else "error")
+    )
     return BoundaryResult(
         status=status,
         boundary_mask=boundary_mask,
@@ -495,7 +518,8 @@ def extract_boundary(
 
 # -------------------- CLI --------------------
 
-def _save_debug_images(out_dir: Path, debug: Dict[str, np.ndarray]) -> None:
+
+def _save_debug_images(out_dir: Path, debug: dict[str, np.ndarray]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for k, img in debug.items():
         p = out_dir / f"{k}.png"
@@ -503,11 +527,12 @@ def _save_debug_images(out_dir: Path, debug: Dict[str, np.ndarray]) -> None:
         if arr is None:
             continue
         if isinstance(arr, np.ndarray) and arr.dtype == bool:
-            arr = (arr.astype(np.uint8) * 255)
+            arr = arr.astype(np.uint8) * 255
         cv2.imwrite(str(p), arr)
 
 
-def main():
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(asctime)s - %(message)s", stream=sys.stdout)
     parser = argparse.ArgumentParser(description="Color- and scale-aware edge/boundary extraction.")
     parser.add_argument("image", help="Path to input image")
     parser.add_argument("--mode", choices=["edges", "boundary"], default="edges")

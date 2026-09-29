@@ -1,0 +1,48 @@
+name: Release
+
+# Publishing happens only from a pushed tag, never from a local upload, so every artifact
+# on PyPI corresponds to a commit anyone can check out.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      - run: uv sync --locked
+      - name: Verify the tag matches the packaged version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(uv run python -c "import enreal; print(enreal.__version__)")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "Tag $TAG does not match enreal.__version__ $PKG" >&2
+            exit 1
+          fi
+      - run: uv run pytest
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/enreal/
+    permissions:
+      id-token: write   # trusted publishing; no API token stored in the repo
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

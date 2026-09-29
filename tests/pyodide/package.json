@@ -1,0 +1,12 @@
+{
+  "name": "enreal-pyodide-parity",
+  "private": true,
+  "description": "Runs the enreal wheel under Pyodide in Node, for tests/test_pyodide_parity.py.",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "pyodide": "314.0.7"
+  }
+}

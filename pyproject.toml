@@ -1,9 +1,126 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
 [project]
 name = "enreal"
-version = "0.1.0"
-description = "Add your description here"
+dynamic = ["version"]
+description = "Turn any image into a 2D platformer stage: a rule-based computer vision engine that traces playable terrain"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+authors = [{ name = "Guan Zheng Huang" }]
+maintainers = [{ name = "CoronRing" }]
+keywords = [
+    "platformer",
+    "level-generation",
+    "procedural-generation",
+    "computer-vision",
+    "opencv",
+    "edge-detection",
+    "game-development",
+    "pyodide",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Typing :: Typed",
+]
+# The engine needs only these three, so it installs anywhere and also loads in the
+# browser under Pyodide, which ships prebuilt builds of all of them.
 dependencies = [
+    "numpy>=1.26",
+    "opencv-python-headless>=4.10",
+    "pydantic>=2.5",
+]
+
+[project.urls]
+Homepage = "https://coronring.github.io/EnReal/"
+Repository = "https://github.com/CoronRing/EnReal"
+Issues = "https://github.com/CoronRing/EnReal/issues"
+Changelog = "https://github.com/CoronRing/EnReal/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/CoronRing/EnReal/tree/main/docs"
+
+[dependency-groups]
+# The optional HTTP server in server/. It is not part of the published package.
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.20",
 ]
+dev = [
+    { include-group = "server" },
+    "httpx2>=2.13.1",  # FastAPI TestClient
+    "pytest>=8.3",
+    "ruff>=0.15",
+    "mypy>=2.0",
+    # Same OpenCV build that Pyodide ships, so the test suite exercises exactly the
+    # geometry the browser produces. Keep in step with tool.enreal.web below.
+    "opencv-python-headless==4.11.0.86",
+]
+
+[tool.hatch.version]
+path = "src/enreal/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/enreal"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/enreal",
+    "tests",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+# The published source holds only the engine; these tests need server/, web/ and scripts/.
+exclude = [
+    "tests/test_server.py",
+    "tests/test_pyodide_parity.py",
+    "tests/pyodide",
+]
+
+[tool.enreal.web]
+# Pyodide release the browser build loads (scripts/build_web.py writes it into
+# web/engine/engine.json). It ships opencv-python 4.11.0.86, matching the dev pin.
+pyodide-version = "314.0.7"
+
+[tool.pytest.ini_options]
+minversion = "8.3"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = [".", "src"]  # repo root holds the server/ and tests/ packages; src/ holds enreal
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",   # line length is the formatter's job, not the linter's
+    "B008",   # FastAPI declares parameter defaults as function calls by design
+    "UP040",  # keep plain TypeAlias: FastAPI needs a runtime Literal, not a TypeAliasType
+]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/enreal", "server", "scripts"]
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true

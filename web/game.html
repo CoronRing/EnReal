@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>EnReal: Play</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect width=%2716%27 height=%2716%27 rx=%273%27 fill=%27%230f1117%27/%3E%3Cpath d=%27M2 12 L6 8 L9 10 L14 4%27 stroke=%27%23ff2020%27 stroke-width=%272%27 fill=%27none%27/%3E%3C/svg%3E" />
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; background: #111; color: #eee; }
+    #container { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; }
+    #hud { padding: 8px 12px; font-family: system-ui, Arial, sans-serif; font-size: 14px; color: #ddd; }
+    #hud a, .empty a { color: #8fb3ff; }
+    #game-root { position: relative; flex: 1 1 auto; width: 100%; height: calc(100vh - 44px); }
+    .empty { padding: 24px; font-family: system-ui, Arial, sans-serif; color: #ddd; }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div id="hud">
+      <a href="index.html">&larr; New stage</a> &middot;
+      A/D move, W or Space jump, S drop through, Shift sprint, J fire or talk, K bomb, G grenade, H paint terrain.
+    </div>
+    <div id="game-root"></div>
+  </div>
+
+  <script
+    src="https://cdn.jsdelivr.net/npm/phaser@3.80.0/dist/phaser.min.js"
+    integrity="sha384-v+iUAPwfy4xt0s90a/lHQTHmt1ERAFIaNhNVdIOhEmgNgbGVUhEZPBCUNllLJf+k"
+    crossorigin="anonymous"></script>
+  <script src="game.js"></script>
+</body>
+</html>
